@@ -1,29 +1,109 @@
 
 #include <Wire.h> 
 #include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27,20,4);
 
+// Initializing Temperature Variables:
+//  setTemp = The set to temperature controlled by the buttons
+//  curTemp = current temperature that the sensor is reading
+// Dallas temperature sensor is initialized to pin 4
+// To change Temp sensor readings to/from Celsius or Fahrenheit
+// see: if(Timer1Flag && Timer1seconds == 1) block in loop().
 
-float setTemp = 15.0;
+float setTemp = 24.0;
 float curTemp = 0.0;
 String text;
-int upperTempThreshold = 20;
-int lowerTempThreshold = 10;
-
+int upperTempThreshold = setTemp + 1;
+int lowerTempThreshold = setTemp - 1;
+int maxTemp = 98;
+int minTemp = 70;
 
 
 const int BUTTON_UP = 2;
 const int BUTTON_DWN = 3;
-long unsigned int lastPress;
-const int debounceTime = 20;
+unsigned long lastPress;
+const int debounceTime = 400;
 
 volatile int buttonUP;
 volatile int buttonDWN;
 
-int analogPin = A0;
 int sensor;
 float vout;
 float tempInCelsius;
 float tempInFahrenheit;
+
+int fanPin = 5;
+
+int alarmPin = 6;
+bool alarmState = 0;
+unsigned long alarmTimeCheck = 0;
+int alarmTime = 1 * 1000;  // alarm turns on for 1 sec then turns of for 1 sec
+
+int relayPin = 7;
+unsigned long heatTime = 3 * 1000;    // turn on nichrome for 3 seconds at a time
+unsigned long coolTime = 2 * 1000;    // then turn off for 2 seconds at a time
+unsigned long timeCheck = 0;
+bool heaterON = false;
+
+// LCD timer interrupt code
+const uint16_t t1_comp = 62500;  // 62500 cycles = 1 sec
+bool Timer1Flag = 0;
+volatile int Timer1seconds = 0;
+
+
+/*--------------------------------------*/
+
+
+bool debounceCheck()
+{
+  if( (millis() - lastPress) > debounceTime)
+  {
+    lastPress = millis(); 
+    buttonUP = 0;
+    buttonDWN = 0;
+    
+    return true;
+  }
+  return false;
+}
+
+void updateLCDsetTemp(String text)
+{
+  
+  lcd.setCursor(9,1);
+
+  lcd.print(text);
+}
+
+void updateLCDcurTemp(String text)
+{
+ 
+  lcd.setCursor(9,0);
+
+  lcd.print(text);
+}
+
+void soundAlarm()
+{
+  tone(alarmPin, 1000);
+  delay(1000);  
+}
+
+void ISR_buttonUP()
+{
+  buttonUP = 1;
+}
+
+void ISR_buttonDWN()
+{
+  buttonDWN = 1;
+}
+
+ISR(TIMER1_COMPA_vect)
+{
+   Timer1Flag = 1;
+   Timer1seconds++;
+}
 
 /*--------------------------------------*/
 
@@ -32,8 +112,8 @@ float tempInFahrenheit;
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-// Data wire is plugged into port 2 on the Arduino
-#define ONE_WIRE_BUS 2
+// Data wire is plugged into port 4 on the Arduino
+#define ONE_WIRE_BUS 4
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
@@ -45,10 +125,6 @@ DallasTemperature sensors(&oneWire);
 DeviceAddress insideThermometer;
 
 
-
-
-
-LiquidCrystal_I2C lcd(0x27,20,4);
 
 void setup() {
   // put your setup code here, to run once:
@@ -69,17 +145,15 @@ void setup() {
   /* ----- Assigning In/Output Pins ----- */
   pinMode(BUTTON_UP, INPUT);
   pinMode(BUTTON_DWN, INPUT);
-  
+  pinMode(fanPin, OUTPUT);
+  pinMode(alarmPin, OUTPUT);
+  pinMode(relayPin, OUTPUT);
 
   /* ----- Assigning Interrupt Pins ----- */
   attachInterrupt(digitalPinToInterrupt(2), ISR_buttonUP, RISING);
   attachInterrupt(digitalPinToInterrupt(3), ISR_buttonDWN, RISING);
 
-
-
-  /*------ Dallas Temperature Sensor Initialization Code -----*/
-
-
+  /*------------------------------------*/
   // start serial port
   Serial.begin(9600);
   Serial.println("Dallas Temperature IC Control Library Demo");
@@ -124,7 +198,7 @@ void setup() {
 
   // show the addresses we found on the bus
   Serial.print("Device 0 Address: ");
-  printAddress(insideThermometer);
+  //printAddress(insideThermometer);
   Serial.println();
 
   // set the resolution to 9 bit (Each Dallas/Maxim device is capable of several different resolutions)
@@ -134,154 +208,145 @@ void setup() {
   Serial.print(sensors.getResolution(insideThermometer), DEC); 
   Serial.println();
 
+  /* --------- Ignore this code it's too ugly --------- */
+  /* ----- LCD Display Timer1 code (Refresh Rate) ----- */
+
+  // Reset Timer1 Control Register A
+  TCCR1A = 0;
+
+  // Set CTC (Clear Timer/Counter1)
+  TCCR1B &= ~(1 << WGM13);
+  TCCR1B |= (1 << WGM12);
+
+  // Set to prescaler of 256
+  TCCR1B |= (1 << CS12);
+  TCCR1B &= ~(1 << CS11);
+  TCCR1B &= ~(1 << CS10);
+
+  // Reset Timer1 and set Compare value
+  TCNT1 = 0;
+  OCR1A = t1_comp;
+
+  // Enable Timer1 compare interrupt
+  TIMSK1 = (1 << OCIE1A);
+
+  // Enable global interrupts
+  sei();
   
 } 
-
-// function to print the temperature for a device
-void printTemperature(DeviceAddress deviceAddress)
-{
-  // method 1 - slower
-  //Serial.print("Temp C: ");
-  //Serial.print(sensors.getTempC(deviceAddress));
-  //Serial.print(" Temp F: ");
-  //Serial.print(sensors.getTempF(deviceAddress)); // Makes a second call to getTempC and then converts to Fahrenheit
-
-  // method 2 - faster
-  float tempC = sensors.getTempC(deviceAddress);
-  if(tempC == DEVICE_DISCONNECTED_C) 
-  {
-    Serial.println("Error: Could not read temperature data");
-    return;
-  }
-  Serial.print("Temp C: ");
-  Serial.print(tempC);
-  Serial.print(" Temp F: ");
-  Serial.println(DallasTemperature::toFahrenheit(tempC)); // Converts tempC to Fahrenheit
-}
 
 void loop() {
   
   /* ---- Setting the temp up/down ----- */
-  if( buttonUP && debounceCheck() && setTemp != upperTempThreshold )
+  
+  if( buttonUP && debounceCheck() && setTemp != maxTemp )
   {
     setTemp = setTemp + 0.5;
+    upperTempThreshold = setTemp + 5;
+    lowerTempThreshold = setTemp - 5;
+    
     text = String(setTemp, 1);
     updateLCDsetTemp(text);
+
   }
-  if( buttonDWN && debounceCheck() && setTemp != lowerTempThreshold )
+  if( buttonDWN && debounceCheck() && setTemp != minTemp )
   {
     setTemp = setTemp - 0.5;
+    upperTempThreshold = setTemp + 5;
+    lowerTempThreshold = setTemp - 5;
+    
     text = String(setTemp, 1);
     updateLCDsetTemp(text);
   }
+  
 
   /* ---- Display the current temp ----- */
-
-
-  //updateLCDcurTemp( readTemp() );
-  delay(500);
-
+  
+  if(Timer1Flag && Timer1seconds == 1)   // Timer1seconds sets the refresh rate in seconds
+  {
+    sensors.requestTemperatures(); // Send the command to get temperatures
+    tempInCelsius = sensors.getTempC(insideThermometer);
+    updateLCDcurTemp( String(tempInCelsius, 2) );
+    Timer1Flag = 0;
+    Timer1seconds = 0;
+  }
+  
 
   /* ---- Adjusting the current temp --- */
-  /*
-  if( setTemp > curTemp && heaterFlag == 0 )
-  {
-    // heat nichrom w/ 5V
-    digitalWrite(HIGH, tempSensorPin)
-    heaterFlag = 1
+
+  
+  if( tempInCelsius < lowerTempThreshold && heaterON == false && (millis() - timeCheck) > coolTime )
+  {    
+    timeCheck = millis();
+    // heat nichrom w/ 12V @ 3A for heatTime seconds
+    
+    // turn on relay (to allow current through nichrome)
+    digitalWrite(relayPin, HIGH);
+    
+    // turn on fan
+    analogWrite(fanPin, 140);
+    delay(100);
+    analogWrite(fanPin, 40);
+
+    heaterON = true;
   }
-  if( setTemp > curTemp && heaterFlag == 0 )
-  {
-    // check timer
-    if( time's up )
-    {
-      // turn off nichrome
-      digitalWrite(LOW, tempSensorPin);
-    }
+  else if( heaterON == true  && (millis() - timeCheck) > heatTime )
+  {    
+    timeCheck = millis();
+    
+    // turn off relay and fan after coolTime seconds
+    digitalWrite(relayPin, LOW);
+    analogWrite(fanPin, 0);
+    
+    heaterON = false;
   }
-  if( curTemp > setTemp )
+  
+  
+  else if( 0 ) //curTemp > upperTempThreshold )
   {
     // turn on fan
-  }
-
-  */
-  /* ---- Alarms (if too hot/cold) ----- */
-}
-
-bool debounceCheck()
-{
-  if( (millis() - lastPress) > debounceTime)
-  {
-    lastPress = millis(); 
-    buttonUP = 0;
-    buttonDWN = 0;
+    analogWrite(fanPin, 140);
+    delay(100);
+    analogWrite(fanPin, 40);
     
-    return true;
   }
-  return false;
-}
-
-String readTemp()
-{
-  /*
-  // read the temperature sensor and convert to volts
-   sensor = analogRead(analogPin); 
-   // vout = (sensor/bits)*volts
-   vout = (sensor/1023.0)*5000;
-
-
-   
-   // convert to temperature in degrees C
-   tempInCelsius = (vout - 500.0)/10.0; 
-   tempInFahrenheit = 1.8*tempInCelsius + 32;
-
-   tempInFahrenheit = tempInFahrenheit + 5;
-   
-   // print the temperature to the Serial Monitor
-   //Serial.println(tempInFahrenheit);
-   return String( tempInFahrenheit, 2);
-   
-  // the delay sets the data collection rate
-  // delay(2000); //delay in milliseconds
-  */
-
-  sensors.requestTemperatures();
-  
-  
-}
-
-void updateLCDsetTemp(String text)
-{
-  
-  lcd.setCursor(9,1);
-
-  lcd.print(text);
-}
-
-void updateLCDcurTemp(String text)
-{
- 
-  lcd.setCursor(9,0);
-
-  lcd.print(text);
-}
-
-void ISR_buttonUP()
-{
-  buttonUP = 1;
-}
-
-void ISR_buttonDWN()
-{
-  buttonDWN = 1;
-}
-
-// function to print a device address
-void printAddress(DeviceAddress deviceAddress)
-{
-  for (uint8_t i = 0; i < 8; i++)
+  else if( 0 ) //curTemp < setTemp )
   {
-    if (deviceAddress[i] < 16) Serial.print("0");
-    Serial.print(deviceAddress[i], HEX);
+    analogWrite(fanPin, 0);
   }
-}
+  
+  
+  /* ---- Alarms (if too hot/cold) ----- */
+  
+  if( curTemp < minTemp || curTemp > maxTemp && (millis() - alarmTimeCheck) > alarmTime )
+  {
+    alarmState = !alarmState;
+    alarmTimeCheck = millis();
+    
+    if(alarmState == 1)
+    {
+      analogWrite(alarmPin, 128);  
+    }
+    if(alarmState == 0)
+    {
+      analogWrite(alarmPin, 0);  
+    }
+  }
+  if( curTemp > minTemp || curTemp < maxTemp )
+  {
+    analogWrite(alarmPin, 0);
+  }  
+  
+
+    /* ---- Alarms (if too hot/cold) ----- */
+  /*
+  if( curTemp < minTemp || curTemp > maxTemp )
+  {
+    analogWrite(alarmPin, 128);  
+    delay(1000);
+    analogWrite(alarmPin, 0);  
+    delay(1000);
+  }
+    */
+  }
+  
